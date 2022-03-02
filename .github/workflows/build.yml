@@ -100,7 +100,9 @@ jobs:
           path: |
               ${{ steps.go-cache-paths.outputs.go-build }}
               ${{ steps.go-cache-paths.outputs.go-mod }}
-          key: ${{ matrix.os }}-go-cache-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-cache-${{ hashFiles('*/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
       - name: Compute current version to inform GoReleaser
         run: |
           echo "GORELEASER_CURRENT_TAG=v$(pulumictl get version --language generic -o)" >> $GITHUB_ENV
@@ -147,9 +149,11 @@ jobs:
         with:
           repo: pulumi/pulumictl
       - name: Set up Python ${{ inputs.python-version }}
-        uses: actions/setup-python@v1
+        uses: actions/setup-python@v2
         with:
           python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: sdk/python/requirements.txt
       - name: Compute current version to inform wheel build
         run: |
           echo "PYPI_VERSION=$(pulumictl get version --language python)" >> $GITHUB_ENV
@@ -186,9 +190,11 @@ jobs:
         with:
           repo: pulumi/pulumictl
       - name: Set up Node ${{ inputs.node-version }}
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v2
         with:
           node-version: ${{ inputs.node-version }}
+          cache: yarn
+          cache-dependency-path: sdk/nodejs/package.json
       - name: Install yarn
         run: |
           npm install -g yarn
