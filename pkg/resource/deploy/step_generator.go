@@ -144,6 +144,10 @@ func (sg *stepGenerator) GenerateReadSteps(event ReadResourceEvent) ([]Step, res
 		newState.SequenceNumber = old.SequenceNumber
 	}
 
+	if newState.ID == "" {
+		return nil, result.Errorf("Expected an ID for %v", urn)
+	}
+
 	// If the snapshot has an old resource for this URN and it's not external, we're going
 	// to have to delete the old resource and conceptually replace it with the resource we
 	// are about to read.
@@ -287,6 +291,7 @@ func (sg *stepGenerator) generateSteps(event RegisterResourceEvent) ([]Step, res
 	var oldOutputs resource.PropertyMap
 	var old *resource.State
 	var hasOld bool
+	var alias []resource.URN
 	for _, urnOrAlias := range append([]resource.URN{urn}, goal.Aliases...) {
 		old, hasOld = sg.deployment.Olds()[urnOrAlias]
 		if hasOld {
@@ -301,6 +306,11 @@ func (sg *stepGenerator) generateSteps(event RegisterResourceEvent) ([]Step, res
 
 				// register the alias with the provider registry
 				sg.deployment.providers.RegisterAlias(urn, urnOrAlias)
+
+				// NOTE: we save the URN of the existing resource so that the snapshotter can replace references to the
+				// existing resource with the URN of the newly-registered resource. We do not need to save any of the
+				// resource's other possible aliases.
+				alias = []resource.URN{urnOrAlias}
 			}
 			break
 		}
@@ -321,7 +331,7 @@ func (sg *stepGenerator) generateSteps(event RegisterResourceEvent) ([]Step, res
 	// get serialized into the checkpoint file.
 	new := resource.NewState(goal.Type, urn, goal.Custom, false, "", inputs, nil, goal.Parent, goal.Protect, false,
 		goal.Dependencies, goal.InitErrors, goal.Provider, goal.PropertyDependencies, false,
-		goal.AdditionalSecretOutputs, goal.Aliases, &goal.CustomTimeouts, "", 1, goal.RetainOnDelete)
+		goal.AdditionalSecretOutputs, alias, &goal.CustomTimeouts, "", 1, goal.RetainOnDelete)
 	if hasOld {
 		new.SequenceNumber = old.SequenceNumber
 	}
@@ -443,8 +453,8 @@ func (sg *stepGenerator) generateSteps(event RegisterResourceEvent) ([]Step, res
 		new.Inputs = inputs
 	}
 
-	// If we're in experimental mode generate a plan
-	if sg.opts.ExperimentalPlans {
+	// If the resource is valid and we're in experimental mode generate a plan
+	if !invalid && sg.opts.ExperimentalPlans {
 		if recreating || wasExternal || sg.isTargetedReplace(urn) || !hasOld {
 			oldInputs = nil
 		}
@@ -459,7 +469,8 @@ func (sg *stepGenerator) generateSteps(event RegisterResourceEvent) ([]Step, res
 
 	// If there is a plan for this resource, validate that the program goal conforms to the plan.
 	// If theres no plan for this resource check that nothing has been changed.
-	if sg.deployment.plan != nil {
+	// We don't check plans if the resource is invalid, it's going to fail anyway.
+	if !invalid && sg.deployment.plan != nil {
 		resourcePlan, ok := sg.deployment.plan.ResourcePlans[urn]
 		if !ok {
 			if old == nil {
@@ -1346,8 +1357,14 @@ func diffResource(urn resource.URN, id resource.ID, oldInputs, oldOutputs,
 	return diff, nil
 }
 
-// issueCheckErrors prints any check errors to the diagnostics sink.
+// issueCheckErrors prints any check errors to the diagnostics error sink.
 func issueCheckErrors(deployment *Deployment, new *resource.State, urn resource.URN,
+	failures []plugin.CheckFailure) bool {
+	return issueCheckFailures(deployment.Diag().Errorf, new, urn, failures)
+}
+
+// issueCheckErrors prints any check errors to the given printer function.
+func issueCheckFailures(printf func(*diag.Diag, ...interface{}), new *resource.State, urn resource.URN,
 	failures []plugin.CheckFailure) bool {
 
 	if len(failures) == 0 {
@@ -1356,10 +1373,10 @@ func issueCheckErrors(deployment *Deployment, new *resource.State, urn resource.
 	inputs := new.Inputs
 	for _, failure := range failures {
 		if failure.Property != "" {
-			deployment.Diag().Errorf(diag.GetResourcePropertyInvalidValueError(urn),
+			printf(diag.GetResourcePropertyInvalidValueError(urn),
 				new.Type, urn.Name(), failure.Property, inputs[failure.Property], failure.Reason)
 		} else {
-			deployment.Diag().Errorf(
+			printf(
 				diag.GetResourceInvalidError(urn), new.Type, urn.Name(), failure.Reason)
 		}
 	}
@@ -1718,7 +1735,7 @@ func (sg *stepGenerator) AnalyzeResources() result.Result {
 				}
 			}
 			if urn == "" {
-				urn = resource.DefaultRootStackURN(sg.deployment.Target().Name, sg.deployment.source.Project())
+				urn = resource.DefaultRootStackURN(sg.deployment.Target().Name.Q(), sg.deployment.source.Project())
 			}
 			sg.opts.Events.OnPolicyViolation(urn, d)
 		}
